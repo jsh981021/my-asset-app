@@ -1,75 +1,63 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import sqlite3
 import plotly.express as px
 from datetime import datetime
 import logging
 import warnings
+from streamlit_gsheets import GSheetsConnection
 
-# ==========================================
-# 🚀 [로그/경고 제어] 터미널 경고 차단
-# ==========================================
+# 🚀 터미널 경고 차단
 warnings.filterwarnings("ignore", message=".*ScriptRunContext.*")
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.getLogger("streamlit.runtime.scriptrunner.script_run_context").setLevel(logging.ERROR)
 logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(logging.ERROR)
 
 # ==========================================
-# 1. 데이터베이스(SQLite) 설정
+# 1. Google Sheets 데이터베이스 연결 (assets.db 대체)
 # ==========================================
-def init_db():
-    conn = sqlite3.connect('assets.db')
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            trade_date TEXT NOT NULL,
-            trade_type TEXT NOT NULL,
-            account TEXT NOT NULL,
-            name TEXT NOT NULL,
-            asset_class TEXT NOT NULL,
-            quantity REAL NOT NULL,
-            price REAL NOT NULL,
-            currency TEXT NOT NULL
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-def add_transaction(trade_date, trade_type, account, name, asset_class, quantity, price, currency):
-    conn = sqlite3.connect('assets.db')
-    c = conn.cursor()
-    c.execute('INSERT INTO transactions (trade_date, trade_type, account, name, asset_class, quantity, price, currency) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', 
-              (trade_date, trade_type, account, name, asset_class, quantity, price, currency))
-    conn.commit()
-    conn.close()
+# secrets.toml에 등록한 정보를 바탕으로 구글 시트와 연결
+conn = st.connection("gsheets", type=GSheetsConnection)
 
 def get_transactions():
-    conn = sqlite3.connect('assets.db')
-    df = pd.read_sql_query("SELECT * FROM transactions ORDER BY trade_date ASC, id ASC", conn)
-    conn.close()
-    return df
+    try:
+        # 구글 시트를 읽어옵니다.
+        df = conn.read(worksheet="Sheet1", ttl=0) # ttl=0: 항상 최신 데이터 로드
+        if df.empty:
+            df = pd.DataFrame(columns=['id', 'trade_date', 'trade_type', 'account', 'name', 'asset_class', 'quantity', 'price', 'currency'])
+        else:
+            # 빈 행이 읽히는 경우 제거
+            df = df.dropna(subset=['trade_date', 'name', 'quantity', 'price'])
+        return df
+    except Exception as e:
+        # 시트가 비어있거나 처음 시작할 때 템플릿 반환
+        return pd.DataFrame(columns=['id', 'trade_date', 'trade_type', 'account', 'name', 'asset_class', 'quantity', 'price', 'currency'])
+
+def add_transaction(trade_date, trade_type, account, name, asset_class, quantity, price, currency):
+    df = get_transactions()
+    new_id = int(df['id'].max()) + 1 if not df.empty and not pd.isna(df['id'].max()) else 1
+    new_row = pd.DataFrame([{
+        'id': new_id, 'trade_date': trade_date, 'trade_type': trade_type, 'account': account, 
+        'name': name, 'asset_class': asset_class, 'quantity': quantity, 'price': price, 'currency': currency
+    }])
+    updated_df = pd.concat([df, new_row], ignore_index=True)
+    conn.update(worksheet="Sheet1", data=updated_df)
+    st.cache_data.clear() # 캐시 초기화
 
 def delete_transaction(tx_id):
-    conn = sqlite3.connect('assets.db')
-    c = conn.cursor()
-    c.execute("DELETE FROM transactions WHERE id = ?", (tx_id,))
-    conn.commit()
-    conn.close()
+    df = get_transactions()
+    updated_df = df[df['id'] != tx_id]
+    conn.update(worksheet="Sheet1", data=updated_df)
+    st.cache_data.clear()
 
 def update_transaction(tx_id, trade_date, trade_type, account, name, asset_class, quantity, price, currency):
-    conn = sqlite3.connect('assets.db')
-    c = conn.cursor()
-    c.execute('''
-        UPDATE transactions 
-        SET trade_date=?, trade_type=?, account=?, name=?, asset_class=?, quantity=?, price=?, currency=?
-        WHERE id=?
-    ''', (trade_date, trade_type, account, name, asset_class, quantity, price, currency, tx_id))
-    conn.commit()
-    conn.close()
-
-init_db()
+    df = get_transactions()
+    idx = df.index[df['id'] == tx_id].tolist()
+    if idx:
+        df.loc[idx[0], ['trade_date', 'trade_type', 'account', 'name', 'asset_class', 'quantity', 'price', 'currency']] = \
+            [trade_date, trade_type, account, name, asset_class, quantity, price, currency]
+        conn.update(worksheet="Sheet1", data=df)
+        st.cache_data.clear()
 
 def get_korean_name(name_str):
     if "(" in name_str and ")" in name_str:
@@ -86,12 +74,10 @@ def calculate_historical_cagr(asset_name, asset_class):
 
         ticker = yf.Ticker(real_ticker)
         hist = ticker.history(period="10y")
-        
         if len(hist) > 10:
             start_price = float(hist['Close'].iloc[0])
             end_price = float(hist['Close'].iloc[-1])
             n_years = (hist.index[-1] - hist.index[0]).days / 365.25
-            
             if n_years > 0:
                 cagr = (end_price / start_price) ** (1 / n_years) - 1
                 if n_years < 3 or cagr > 0.20 or "AI" in asset_name or "광통신" in asset_name:
@@ -121,8 +107,8 @@ def get_stock_volatility(asset_name, asset_class):
 # ==========================================
 # 2. 스트림릿 UI 및 실시간 데이터 연동
 # ==========================================
-st.set_page_config(page_title="통합 자산 관리 시스템", layout="wide")
-st.title("💰 내 모든 자산 한눈에 보기")
+st.set_page_config(page_title="클라우드 자산 관리 시스템", layout="wide")
+st.title("💰 내 모든 자산 한눈에 보기 (Cloud Ver.)")
 
 @st.cache_data(ttl=3600)
 def get_usd_krw_rate():
@@ -154,8 +140,8 @@ else:
 account = st.sidebar.selectbox("세부 계좌명", account_options)
 asset_class = st.sidebar.selectbox("자산 형태 (종류)", ["주식/ETF", "현금(예수금/배당금)", "예적금", "부동산", "기타"])
 
-df_tx_for_names = get_transactions()
-existing_names = df_tx_for_names['name'].unique().tolist() if not df_tx_for_names.empty else []
+df_tx = get_transactions()
+existing_names = df_tx['name'].unique().tolist() if not df_tx.empty else []
 
 default_tickers = [
     "360750.KS (TIGER 미국S&P500)", "133690.KS (TIGER 미국나스닥100)",
@@ -163,7 +149,7 @@ default_tickers = [
     "482730.KS (KODEX 미국AI광통신)", "005930.KS (삼성전자)", "000660.KS (SK하이닉스)",
     "SPY (미국 S&P 500)", "QQQ (미국 나스닥 100)", "SCHD (미국 배당성장)", 
     "AAPL (애플)", "NVDA (엔비디아)", "TSLA (테슬라)",
-    "원화예수금", "달러예수금", "배당금", "전세보증금"
+    "원화예수금", "달러예수금", "배당금", "전세보증금", "제네시스 GV70"
 ]
 
 all_name_options = ["✨ 새로운 종목 직접 입력하기"] + list(dict.fromkeys(existing_names + default_tickers))
@@ -181,8 +167,8 @@ if trade_type == "🎯 평단가 보정":
     if st.sidebar.button("평단가 강제 동기화", use_container_width=True):
         if name:
             current_qty, current_cost = 0.0, 0.0
-            if not df_tx_for_names.empty:
-                asset_tx = df_tx_for_names[(df_tx_for_names['account'] == account) & (df_tx_for_names['name'] == name)]
+            if not df_tx.empty:
+                asset_tx = df_tx[(df_tx['account'] == account) & (df_tx['name'] == name)]
                 for _, r in asset_tx.iterrows():
                     q, p = float(r['quantity']), float(r['price'])
                     if r['trade_type'] == '매수':
@@ -213,8 +199,6 @@ else:
 # ==========================================
 # 3. 데이터 연산 및 렌더링 파이프라인
 # ==========================================
-df_tx = get_transactions()
-
 if not df_tx.empty:
     portfolio_data = []
     grouped = df_tx.groupby(['account', 'name', 'asset_class', 'currency'])
@@ -245,6 +229,7 @@ if not df_tx.empty:
     
     if not df_portfolio.empty:
         current_prices, eval_values_manwon, buy_values_manwon = [], [], []
+        # 🚀 금일 변동폭 연산을 위한 리스트
         day_changes, day_change_pcts = [], []
 
         for idx, row in df_portfolio.iterrows():
@@ -265,8 +250,6 @@ if not df_tx.empty:
                         cur_price = float(hist["Close"].iloc[-1])
                 except:
                     pass
-            else:
-                cur_price = float(row['buy_price'])
             
             current_prices.append(cur_price)
             day_changes.append(day_change)
@@ -278,7 +261,7 @@ if not df_tx.empty:
 
         df_portfolio['현재가'] = current_prices
         df_portfolio['당일변동폭'] = day_changes
-        df_portfolio['당일등락률(%)'] = day_change_pcts
+        df_portfolio['당일등락률'] = day_change_pcts
         df_portfolio['총매입금액(만원)'] = buy_values_manwon
         df_portfolio['평가금액(만원)'] = eval_values_manwon
         df_portfolio['수익률(%)'] = ((df_portfolio['현재가'] - df_portfolio['buy_price']) / df_portfolio['buy_price']) * 100
@@ -299,31 +282,34 @@ if not df_tx.empty:
             col3.metric("전체 합산 수익률", f"{total_profit_rate:.2f} %")
             st.markdown("---")
 
-            # --- 📱 [모바일 대응 완벽 적용] 100% 반응형 MTS 뷰 CSS ---
-            st.markdown("### 📈 주식/ETF 실시간 잔고 현황 (MTS 계좌별 뷰)")
+            # --- 📱 [아이폰 최적화] table-layout: fixed를 적용하여 가로 잘림 100% 방지 ---
+            st.markdown("### 📈 주식/ETF 실시간 잔고 현황 (MTS 뷰)")
             stock_df = df_portfolio[df_portfolio['asset_class'] == "주식/ETF"]
             
             if not stock_df.empty:
                 mts_css = """<style>
-.mts-container { width: 100%; overflow-x: auto; }
+.mts-container { width: 100%; box-sizing: border-box; }
 .mts-account-banner { width: 100%; box-sizing: border-box; background-color: #f1f2f6; padding: 12px 14px; margin-top: 25px; border-radius: 6px 6px 0 0; display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #222; font-family: 'Apple SD Gothic Neo', sans-serif;}
-.mts-table { width: 100%; box-sizing: border-box; border-collapse: collapse; font-family: 'Apple SD Gothic Neo', sans-serif; background-color: white; margin-bottom: 25px; border-bottom: 1px solid #ccc;}
-.mts-table th { border-bottom: 1px solid #eee; padding: 8px 6px; color: #888; font-weight: normal; font-size: 0.8em; text-align: right; background-color: #fafafa;}
-.mts-table th:first-child { text-align: left; }
+.mts-table { width: 100%; box-sizing: border-box; table-layout: fixed; border-collapse: collapse; font-family: 'Apple SD Gothic Neo', sans-serif; background-color: white; margin-bottom: 25px; border-bottom: 1px solid #ccc;}
+.mts-table th { border-bottom: 1px solid #eee; padding: 8px 4px; color: #888; font-weight: normal; font-size: 0.75em; text-align: right; background-color: #fafafa;}
+.mts-table th:nth-child(1) { text-align: left; width: 33%; }
+.mts-table th:nth-child(2) { width: 23%; }
+.mts-table th:nth-child(3) { width: 22%; }
+.mts-table th:nth-child(4) { width: 22%; }
 .mts-row { border-bottom: 1px solid #eee; }
-.mts-cell { padding: 12px 6px; text-align: right; line-height: 1.3; }
+.mts-cell { padding: 10px 4px; text-align: right; line-height: 1.3; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .mts-cell:first-child { text-align: left; }
-.top-text { font-size: 0.9em; font-weight: 600; color: #222; white-space: nowrap; text-overflow: ellipsis; overflow: hidden;}
-.sub-text { font-size: 0.75em; color: #777; margin-top: 3px;}
+.top-text { font-size: 0.88em; font-weight: 600; color: #222; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.sub-text { font-size: 0.75em; color: #777; margin-top: 3px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .val-blue { color: #0984e3 !important; }
 .val-red { color: #d63031 !important; }
 
-/* 📱 아이폰 등 작은 화면일 때 글씨와 여백을 살짝 줄여주는 마법의 미디어 쿼리 */
+/* 📱 아이폰 대응 미디어 쿼리 강화 (폰트 및 패딩 대폭 축소) */
 @media screen and (max-width: 600px) {
-    .mts-table th { font-size: 0.7em; padding: 6px 4px; }
-    .mts-cell { padding: 10px 4px; }
-    .top-text { font-size: 0.8em; }
-    .sub-text { font-size: 0.65em; }
+    .mts-table th { font-size: 0.65em; padding: 6px 2px; }
+    .mts-cell { padding: 8px 2px; }
+    .top-text { font-size: 0.75em; }
+    .sub-text { font-size: 0.62em; }
     .mts-account-banner { flex-direction: column; align-items: flex-start; gap: 4px; padding: 10px; }
     .mts-account-banner > div:last-child { align-self: flex-start; text-align: left !important; }
 }
@@ -341,17 +327,18 @@ if not df_tx.empty:
                     acc_sign = "+" if acc_profit_manwon > 0 else ""
                     
                     html_content += f"""<div class="mts-account-banner">
-<div style="font-weight: bold; color: #2f3542; font-size: 1.05em; text-align: left;">📍 {acc}</div>
-<div style="font-size: 0.88em; color: #57606f; text-align: right;">총 평가: <b>{acc_eval_manwon:,.0f} 만원</b> (<span class="{acc_color}">{acc_sign}{acc_return_pct:.2f}%</span>)</div>
+<div style="font-weight: bold; color: #2f3542; font-size: 1.0em; text-align: left;">📍 {acc}</div>
+<div style="font-size: 0.85em; color: #57606f; text-align: right;">총 평가: <b>{acc_eval_manwon:,.0f} 만원</b> (<span class="{acc_color}">{acc_sign}{acc_return_pct:.2f}%</span>)</div>
 </div>"""
                     
+                    # 🚀 오늘 등락(변동폭)을 표시하기 위해 4번째 컬럼 헤더 수정
                     html_content += """<table class="mts-table">
 <thead>
 <tr>
 <th>종목명<br><span style="font-size:0.8em; color:#aaa;">보유수량</span></th>
 <th>평가손익<br><span style="font-size:0.8em; color:#aaa;">수익률(%)</span></th>
 <th>평가금액<br><span style="font-size:0.8em; color:#aaa;">매입금액</span></th>
-<th>현재가<br><span style="font-size:0.8em; color:#aaa;">평균단가</span></th>
+<th>현재가<br><span style="font-size:0.8em; color:#aaa;">오늘 변동(%)</span></th>
 </tr>
 </thead>
 <tbody>"""
@@ -363,8 +350,10 @@ if not df_tx.empty:
                         buy_amt = row['총매입금액(만원)'] * 10000
                         profit_loss = eval_amt - buy_amt
                         return_pct = row['수익률(%)']
+                        
                         cur_price = row['현재가']
-                        avg_price = row['buy_price']
+                        day_change = row['당일변동폭']
+                        day_pct = row['당일등락률']
                         
                         is_usd = row['currency'] == "USD"
                         price_fmt = "{:,.2f}" if is_usd else "{:,.0f}"
@@ -372,11 +361,18 @@ if not df_tx.empty:
                         color_class = "val-red" if profit_loss > 0 else "val-blue" if profit_loss < 0 else ""
                         sign = "+" if profit_loss > 0 else ""
                         
+                        # 오늘 하루 변동 색상 기호 (별도 판별)
+                        day_color = "val-red" if day_change > 0 else "val-blue" if day_change < 0 else ""
+                        day_sign = "▲" if day_change > 0 else "▼" if day_change < 0 else ""
+                        day_display = f"{day_sign}{abs(day_change):,.0f} ({day_pct:+.2f}%)" if day_change != 0 else "0.00 (0.00%)"
+                        if is_usd and day_change != 0:
+                            day_display = f"{day_sign}{abs(day_change):,.2f} ({day_pct:+.2f}%)"
+                        
                         html_content += f"""<tr class="mts-row">
-<td class="mts-cell"><div class="top-text">{korean_name}</div><div class="sub-text">{qty:,.2f}</div></td>
+<td class="mts-cell" title="{korean_name}"><div class="top-text">{korean_name}</div><div class="sub-text">{qty:,.2f}</div></td>
 <td class="mts-cell"><div class="top-text {color_class}">{sign}{profit_loss:,.0f}</div><div class="sub-text {color_class}">{sign}{return_pct:,.2f}%</div></td>
 <td class="mts-cell"><div class="top-text">{eval_amt:,.0f}</div><div class="sub-text">{buy_amt:,.0f}</div></td>
-<td class="mts-cell"><div class="top-text {color_class}">{price_fmt.format(cur_price)}</div><div class="sub-text">{price_fmt.format(avg_price)}</div></td>
+<td class="mts-cell"><div class="top-text">{price_fmt.format(cur_price)}</div><div class="sub-text {day_color}">{day_display}</div></td>
 </tr>"""
                     
                     html_content += "</tbody></table>"
@@ -605,7 +601,7 @@ if not df_tx.empty:
                 if edit_id in df_tx['id'].values:
                     tx_to_edit = df_tx[df_tx['id'] == edit_id].iloc[0]
                     with st.form("edit_form"):
-                        e_trade_date = st.date_input("거래 날짜", datetime.strptime(tx_to_edit['trade_date'], '%Y-%m-%d'))
+                        e_trade_date = st.date_input("거래 날짜", pd.to_datetime(tx_to_edit['trade_date']))
                         e_trade_type = st.radio("거래 종류", ["매수", "매도", "단가 보정"], index=0 if tx_to_edit['trade_type'] == '매수' else (1 if tx_to_edit['trade_type'] == '매도' else 2), horizontal=True)
                         e_account = st.text_input("세부 계좌명", tx_to_edit['account'])
                         e_asset_class = st.text_input("자산 형태", tx_to_edit['asset_class'])
