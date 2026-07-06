@@ -22,7 +22,7 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 def get_transactions():
     try:
         # 구글 시트를 읽어옵니다.
-        df = conn.read(worksheet="Sheet1", ttl=0) # ttl=0: 항상 최신 데이터 로드
+        df = conn.read(spreadsheet="12C3FJtLs5Wn3JGVW6ZcUj_M6-iHc8TlL0KPUA6iOYCs", worksheet="Sheet1", ttl=0)
         if df.empty:
             df = pd.DataFrame(columns=['id', 'trade_date', 'trade_type', 'account', 'name', 'asset_class', 'quantity', 'price', 'currency'])
         else:
