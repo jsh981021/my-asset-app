@@ -5,7 +5,6 @@ import plotly.express as px
 from datetime import datetime
 import logging
 import warnings
-from streamlit_gsheets import GSheetsConnection
 
 # 🚀 터미널 경고 차단
 warnings.filterwarnings("ignore", message=".*ScriptRunContext.*")
@@ -14,20 +13,24 @@ logging.getLogger("streamlit.runtime.scriptrunner.script_run_context").setLevel(
 logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(logging.ERROR)
 
 # ==========================================
-# 1. Google Sheets 데이터베이스 연결
+# 1. 엑셀(CSV) 다운로드 방식으로 구글 시트 연결 (무적의 방법)
 # ==========================================
-conn = st.connection("gsheets", type=GSheetsConnection)
-
 def get_transactions():
+    # 내 구글 시트 고유 ID
+    sheet_id = "12C3FJtLs5Wn3JGVW6ZcUj_M6-iHc8TlL0KPUA6iOYCs"
+    # 실시간 CSV 내보내기 링크
+    csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+    
     try:
-        df = conn.read(worksheet="Sheet1", ttl=0)
+        # 복잡한 설정 없이 pandas로 링크에 있는 엑셀을 바로 읽어옵니다.
+        df = pd.read_csv(csv_url)
         if df.empty:
-            df = pd.DataFrame(columns=['id', 'trade_date', 'trade_type', 'account', 'name', 'asset_class', 'quantity', 'price', 'currency'])
+            return pd.DataFrame(columns=['id', 'trade_date', 'trade_type', 'account', 'name', 'asset_class', 'quantity', 'price', 'currency'])
         else:
             df = df.dropna(subset=['trade_date', 'name', 'quantity', 'price'])
         return df
     except Exception as e:
-        st.error(f"🚨 구글 시트 연결 실패! 상세 에러 내용: {e}")
+        st.error(f"🚨 구글 시트를 읽어오지 못했습니다. 구글 시트의 공유 권한이 '링크가 있는 모든 사용자'로 되어 있는지 확인해주세요! 상세 오류: {e}")
         return pd.DataFrame(columns=['id', 'trade_date', 'trade_type', 'account', 'name', 'asset_class', 'quantity', 'price', 'currency'])
 
 def get_korean_name(name_str):
@@ -487,6 +490,6 @@ if not df_tx.empty:
             st.subheader("📋 구글 시트에 입력된 전체 거래 기록")
             display_tx = df_tx[['id', 'trade_date', 'trade_type', 'account', 'asset_class', 'name', 'quantity', 'price', 'currency']]
             st.dataframe(display_tx.style.format({'quantity': '{:,.2f}', 'price': '{:,.2f}'}), use_container_width=True)
-            st.info("데이터 수정 및 삭제는 구글 스프레드시트에서 직접 진행해 주세요.")
+            st.info("데이터 수정 및 추가는 사이드바의 [구글 시트 열기] 버튼을 통해 진행해 주세요.")
 else:
-    st.info("구글 시트에 등록된 거래 기록이 없습니다. 데이터를 입력해 보세요!")
+    st.info("구글 시트에 등록된 거래 기록이 없습니다. 사이드바의 링크를 통해 데이터를 입력해 보세요!")
